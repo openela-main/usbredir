@@ -1,0 +1,193 @@
+From 6bf41a231b445ac5190c32e281b698b1ee5379b4 Mon Sep 17 00:00:00 2001
+From: Victor Toso <victortoso@redhat.com>
+Date: Fri, 24 Jun 2022 23:29:08 +0200
+Subject: [PATCH 1/2] usbredirparser: Fix unserialize on pristine check
+Content-type: text/plain
+
+As mentioned in the bug below, the user is trying to migrate QEMU and
+it is failing on the unserialization of usbredirparser at the target
+host. The user does not have USB attached to the VM at all.
+
+I've added a test that shows that serialization is currently broken.
+It fails at the 'pristine' check in usbredirparser_unserialize().
+
+This check was added with e37d86c "Skip empty write buffers when
+unserializing parser" and restricted further with 186c4c7 "Avoid
+memory leak from ill-formatted serialization data"
+
+The issue here is that usbredirparser's initialization sets some
+fields and thus it isn't guaranteed to be pristine.
+
+The parser's basic data is:
+
+  | write_buf_count ... : 1
+  | write_buf  ........ : 0xbc03e0
+  | write_buf_total_size: 80
+  | data  ............. : (nil)
+  | header_read: ...... : 0
+  | type_header_read .. : 0
+  | data_read: ........ : 0
+
+The current fix is to to ignore write_buf checks as, again, they are
+not guaranteed to be pristine. usbredirparser library should properly
+overwrite them when unserializing the data and if there were pending
+buffers, they should be freed.
+
+Related: https://bugzilla.redhat.com/show_bug.cgi?id=2096008
+
+Signed-off-by: Victor Toso <victortoso@redhat.com>
+---
+ tests/meson.build               |   1 +
+ tests/serializer.c              | 113 ++++++++++++++++++++++++++++++++
+ usbredirparser/usbredirparser.c |   4 +-
+ 3 files changed, 115 insertions(+), 3 deletions(-)
+ create mode 100644 tests/serializer.c
+
+diff --git a/tests/meson.build b/tests/meson.build
+index 0d4397b..2a179c9 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -1,5 +1,6 @@
+ tests = [
+     'filter',
++    'serializer',
+ ]
+ 
+ deps = dependency('glib-2.0')
+diff --git a/tests/serializer.c b/tests/serializer.c
+new file mode 100644
+index 0000000..4bd669e
+--- /dev/null
++++ b/tests/serializer.c
+@@ -0,0 +1,113 @@
++/*
++ * Copyright 2022 Red Hat, Inc.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, see <http://www.gnu.org/licenses/>.
++*/
++#include "config.h"
++
++#define G_LOG_DOMAIN "serializer"
++#define G_LOG_USE_STRUCTURED
++
++#include "usbredirparser.h"
++
++#include <errno.h>
++#include <locale.h>
++#include <glib.h>
++#include <stdlib.h>
++
++
++static void
++log_cb(void *priv, int level, const char *msg)
++{
++    GLogLevelFlags glog_level;
++
++    switch(level) {
++    case usbredirparser_error:
++        glog_level = G_LOG_LEVEL_ERROR;
++        break;
++    case usbredirparser_warning:
++        glog_level = G_LOG_LEVEL_WARNING;
++        break;
++    case usbredirparser_info:
++        glog_level = G_LOG_LEVEL_INFO;
++        break;
++    case usbredirparser_debug:
++    case usbredirparser_debug_data:
++        glog_level = G_LOG_LEVEL_DEBUG;
++        break;
++    default:
++        g_warn_if_reached();
++        return;
++    }
++    g_log_structured(G_LOG_DOMAIN, glog_level, "MESSAGE", msg);
++}
++
++static struct usbredirparser *
++get_usbredirparser(void)
++{
++    struct usbredirparser *parser = usbredirparser_create();
++    g_assert_nonnull(parser);
++
++    uint32_t caps[USB_REDIR_CAPS_SIZE] = { 0, };
++    /* Typical caps set by usbredirhost */
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_connect_device_version);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_filter);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_device_disconnect_ack);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_ep_info_max_packet_size);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_64bits_ids);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_32bits_bulk_length);
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_bulk_receiving);
++#if LIBUSBX_API_VERSION >= 0x01000103
++    usbredirparser_caps_set_cap(caps, usb_redir_cap_bulk_streams);
++#endif
++    int parser_flags = usbredirparser_fl_usb_host;
++
++    parser->log_func = log_cb;
++    usbredirparser_init(parser,
++                        PACKAGE_STRING,
++                        caps,
++                        USB_REDIR_CAPS_SIZE,
++                        parser_flags);
++    return parser;
++}
++
++static void
++simple (gconstpointer user_data)
++{
++    uint8_t *state = NULL;
++    int ret, len = -1;
++
++    struct usbredirparser *source = get_usbredirparser();
++    ret = usbredirparser_serialize(source, &state, &len);
++    g_assert_cmpint(ret, ==, 0);
++
++    struct usbredirparser *target = get_usbredirparser();
++    ret = usbredirparser_unserialize(target, state, len);
++    g_assert_cmpint(ret, ==, 0);
++
++    g_clear_pointer(&state, free);
++    usbredirparser_destroy(source);
++    usbredirparser_destroy(target);
++}
++
++int
++main(int argc, char **argv)
++{
++    setlocale(LC_ALL, "");
++    g_test_init(&argc, &argv, NULL);
++
++    g_test_add_data_func("/serializer/serialize-and-unserialize", NULL, simple);
++
++    return g_test_run();
++}
+diff --git a/usbredirparser/usbredirparser.c b/usbredirparser/usbredirparser.c
+index cd1136b..a5dd0e7 100644
+--- a/usbredirparser/usbredirparser.c
++++ b/usbredirparser/usbredirparser.c
+@@ -1816,9 +1816,7 @@ int usbredirparser_unserialize(struct usbredirparser *parser_pub,
+         return -1;
+     }
+ 
+-    if (!(parser->write_buf_count == 0 && parser->write_buf == NULL &&
+-          parser->write_buf_total_size == 0 &&
+-          parser->data == NULL && parser->header_read == 0 &&
++    if (!(parser->data == NULL && parser->header_read == 0 &&
+           parser->type_header_read == 0 && parser->data_read == 0)) {
+         ERROR("unserialization must use a pristine parser");
+         usbredirparser_assert_invariants(parser);
+-- 
+2.37.1
+
