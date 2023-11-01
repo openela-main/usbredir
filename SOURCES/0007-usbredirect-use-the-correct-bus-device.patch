@@ -1,0 +1,145 @@
+From c2fc30ec2b424ac6e45e45f756a2559848bd3116 Mon Sep 17 00:00:00 2001
+From: Victor Toso <victortoso@redhat.com>
+Date: Thu, 22 Dec 2022 16:58:43 +0100
+Subject: [PATCH 7/7] usbredirect: use the correct bus-device
+
+This patch is a continuation from:
+"usbredirect: allow multiple devices by vendor:product"
+
+As we were using libusb_open_device_with_vid_pid(), if an user
+requested that device on 2-3 was redirected, we would instead get the
+vendor and product info of device on 2-3 and use that info to pick a
+usb device. This is wrong when multiple devices that shared
+vendor:product are plugged as libbusb_open_device_with_vid_pid()
+always return the same (first) device.
+
+This commit now stores bus-device info and uses that to pick the usb
+device to redirect.
+
+Related: https://gitlab.freedesktop.org/spice/usbredir/-/issues/29
+Signed-off-by: Victor Toso <victortoso@redhat.com>
+---
+ tools/usbredirect.c | 61 +++++++++++++++++++--------------------------
+ 1 file changed, 26 insertions(+), 35 deletions(-)
+
+diff --git a/tools/usbredirect.c b/tools/usbredirect.c
+index 78fe5c2..0451dda 100644
+--- a/tools/usbredirect.c
++++ b/tools/usbredirect.c
+@@ -24,9 +24,14 @@
+ 
+ typedef struct redirect {
+     struct {
++        /* vendor:product */
+         int vendor;
+         int product;
++        /* bus-device */
++        int bus;
++        int device_number;
+     } device;
++    bool by_bus;
+     bool is_client;
+     bool keepalive;
+     bool watch_inout;
+@@ -46,7 +51,7 @@ typedef struct redirect {
+ static void create_watch(redirect *self);
+ 
+ static bool
+-parse_opt_device(const char *device, int *vendor, int *product)
++parse_opt_device(redirect *self, const char *device)
+ {
+     if (!device) {
+         g_warning("No device to redirect. For testing only\n");
+@@ -54,38 +59,15 @@ parse_opt_device(const char *device, int *vendor, int *product)
+     }
+ 
+     if (g_strrstr(device, "-") != NULL) {
+-        /* Get vendor and product by bus and address number */
++        self->by_bus = true;
+         char **usbid = g_strsplit(device, "-", 2);
+         if (usbid == NULL || usbid[0] == NULL || usbid[1] == NULL || usbid[2] != NULL) {
+             g_strfreev(usbid);
+             return false;
+         }
+-        gint64 bus = g_ascii_strtoll(usbid[0], NULL, 10);
+-        gint64 addr = g_ascii_strtoll(usbid[1], NULL, 10);
++        self->device.bus = g_ascii_strtoll(usbid[0], NULL, 10);
++        self->device.device_number = g_ascii_strtoll(usbid[1], NULL, 10);
+         g_strfreev(usbid);
+-
+-        libusb_device **list = NULL;
+-        ssize_t i, n;
+-
+-        n = libusb_get_device_list(NULL, &list);
+-        for (i = 0; i < n; i++) {
+-            if (libusb_get_bus_number(list[i]) == bus &&
+-                    libusb_get_device_address(list[i]) == addr) {
+-                break;
+-            }
+-        }
+-
+-        if (i == n) {
+-            libusb_free_device_list(list, true);
+-            return false;
+-        }
+-
+-        struct libusb_device_descriptor desc;
+-        libusb_get_device_descriptor(list[i], &desc);
+-        *vendor = desc.idVendor;
+-        *product = desc.idProduct;
+-
+-        libusb_free_device_list(list, true);
+         return true;
+     }
+ 
+@@ -95,12 +77,14 @@ parse_opt_device(const char *device, int *vendor, int *product)
+         return false;
+     }
+ 
+-    *vendor = g_ascii_strtoll(usbid[0], NULL, 16);
+-    *product = g_ascii_strtoll(usbid[1], NULL, 16);
++    self->device.vendor = g_ascii_strtoll(usbid[0], NULL, 16);
++    self->device.product = g_ascii_strtoll(usbid[1], NULL, 16);
+     g_strfreev(usbid);
+ 
+-    if (*vendor <= 0 || *vendor > 0xffff || *product < 0 || *product > 0xffff) {
+-        g_printerr("Bad vendor:product values %04x:%04x", *vendor, *product);
++    if (self->device.vendor <= 0 || self->device.vendor > 0xffff ||
++        self->device.product < 0 || self->device.product > 0xffff) {
++        g_printerr("Bad vendor:product values %04x:%04x",
++                   self->device.vendor, self->device.product);
+         return false;
+     }
+ 
+@@ -167,7 +151,7 @@ parse_opts(int *argc, char ***argv)
+ 
+     self = g_new0(redirect, 1);
+     self->watch_inout = true;
+-    if (!parse_opt_device(device, &self->device.vendor, &self->device.product)) {
++    if (!parse_opt_device(self, device)) {
+         g_printerr("Failed to parse device: '%s' - expected: vendor:product or busnum-devnum\n", device);
+         g_clear_pointer(&self, g_free);
+         goto end;
+@@ -536,9 +520,16 @@ open_usb_device(redirect *self)
+             continue;
+         }
+ 
+-        if (self->device.vendor != desc.idVendor ||
+-            self->device.product != desc.idProduct) {
+-            continue;
++        if (self->by_bus &&
++            (self->device.bus != libusb_get_bus_number(devs[i]) ||
++             self->device.device_number != libusb_get_device_address(devs[i]))) {
++             continue;
++        }
++
++        if (!self->by_bus &&
++            (self->device.vendor != desc.idVendor ||
++             self->device.product != desc.idProduct)) {
++             continue;
+         }
+ 
+         if (can_claim_usb_device(devs[i], &dev_handle)) {
+-- 
+2.39.0
+

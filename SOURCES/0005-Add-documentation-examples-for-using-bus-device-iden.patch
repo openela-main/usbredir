@@ -1,0 +1,51 @@
+From 79c3214ef403a801762a79702be20cf8a829e37b Mon Sep 17 00:00:00 2001
+From: John Call <johnsimcall@gmail.com>
+Date: Mon, 19 Dec 2022 19:01:50 +0000
+Subject: [PATCH 5/7] Add documentation examples for using bus-device
+ identification
+
+---
+ tools/usbredirect.1 | 6 ++++++
+ tools/usbredirect.c | 2 +-
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/tools/usbredirect.1 b/tools/usbredirect.1
+index d6b2a63..2be8be0 100644
+--- a/tools/usbredirect.1
++++ b/tools/usbredirect.1
+@@ -4,6 +4,9 @@ usbredirect \- exporting an USB device for use from another (virtual) machine
+ .SH SYNOPSIS
+ .B usbredirect
+ [\fI--device vendor:product\fR] [\fI--to addr:port\fR] [\fI--as addr:port\fR]
++.br
++.B usbredirect
++[\fI--device bus-device\fR] [\fI--to addr:port\fR] [\fI--as addr:port\fR]
+ .SH DESCRIPTION
+ usbredirect is an usbredir client for exporting an USB device either as TCP
+ client or server, for use from another (virtual) machine through the usbredir
+@@ -11,6 +14,9 @@ protocol.
+ .PP
+ You can specify the USB device to export by USB id in the form of
+ \fI<vendorid>:<prodid>\fR.
++.br
++Or you can specify the USB device to export in the form of
++\fI<busnum>-<devnum>\fR.
+ .PP
+ Notice that an instance of usbredirect can only be used to export a single USB
+ device and it will close once the other side closes the connection. If you
+diff --git a/tools/usbredirect.c b/tools/usbredirect.c
+index 59452aa..88c553b 100644
+--- a/tools/usbredirect.c
++++ b/tools/usbredirect.c
+@@ -139,7 +139,7 @@ parse_opts(int *argc, char ***argv)
+     redirect *self = NULL;
+ 
+     GOptionEntry entries[] = {
+-        { "device", 0, 0, G_OPTION_ARG_STRING, &device, "Local USB device to be redirected", NULL },
++        { "device", 0, 0, G_OPTION_ARG_STRING, &device, "Local USB device to be redirected identified as either VENDOR:PRODUCT \"0123:4567\" or BUS-DEVICE \"5-2\"", NULL },
+         { "to", 0, 0, G_OPTION_ARG_STRING, &remoteaddr, "Client URI to connect to", NULL },
+         { "as", 0, 0, G_OPTION_ARG_STRING, &localaddr, "Server URI to be run", NULL },
+         { "keepalive", 'k', 0, G_OPTION_ARG_NONE, &keepalive, "If we should set SO_KEEPALIVE flag on underlying socket", NULL },
+-- 
+2.39.0
+
