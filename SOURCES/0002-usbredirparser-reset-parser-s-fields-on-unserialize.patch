@@ -1,0 +1,63 @@
+From b93c4cae1aebda786a478677d6364308e4579ade Mon Sep 17 00:00:00 2001
+From: Victor Toso <victortoso@redhat.com>
+Date: Sat, 25 Jun 2022 00:29:12 +0200
+Subject: [PATCH 2/2] usbredirparser: reset parser's fields on unserialize
+Content-type: text/plain
+
+This is a followup from previous commit and fixes the following leak.
+
+ | 104 (24 direct, 80 indirect) bytes in 1 blocks are definitely lost in loss record 15 of 19
+ |    at 0x484A464: calloc (vg_replace_malloc.c:1328)
+ |    by 0x485A238: usbredirparser_queue (usbredirparser.c:1235)
+ |    by 0x485A571: usbredirparser_init (usbredirparser.c:227)
+ |    by 0x40130B: get_usbredirparser (serializer.c:77)
+ |    by 0x401379: simple (serializer.c:95)
+ |    by 0x48FA3DD: ??? (in /usr/lib64/libglib-2.0.so.0.7200.2)
+ |    by 0x48FA144: ??? (in /usr/lib64/libglib-2.0.so.0.7200.2)
+ |    by 0x48FA8E1: g_test_run_suite (in /usr/lib64/libglib-2.0.so.0.7200.2)
+ |    by 0x48FA94C: g_test_run (in /usr/lib64/libglib-2.0.so.0.7200.2)
+ |    by 0x401161: main (serializer.c:112)
+ |
+ | LEAK SUMMARY:
+ |    definitely lost: 24 bytes in 1 blocks
+ |    indirectly lost: 80 bytes in 1 blocks
+ |      possibly lost: 0 bytes in 0 blocks
+ |    still reachable: 25,500 bytes in 17 blocks
+ |         suppressed: 0 bytes in 0 blocks
+ | Reachable blocks (those to which a pointer was found) are not shown.
+ | To see them, rerun with: --leak-check=full --show-leak-kinds=all
+
+Signed-off-by: Victor Toso <victortoso@redhat.com>
+---
+ usbredirparser/usbredirparser.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/usbredirparser/usbredirparser.c b/usbredirparser/usbredirparser.c
+index a5dd0e7..9bfc27c 100644
+--- a/usbredirparser/usbredirparser.c
++++ b/usbredirparser/usbredirparser.c
+@@ -1823,6 +1823,21 @@ int usbredirparser_unserialize(struct usbredirparser *parser_pub,
+         return -1;
+     }
+ 
++    {
++        /* We need to reset parser's state to receive unserialized
++         * data. */
++        struct usbredirparser_buf *wbuf = parser->write_buf;
++        while (wbuf) {
++            struct usbredirparser_buf *next_wbuf = wbuf->next;
++            free(wbuf->buf);
++            free(wbuf);
++            wbuf = next_wbuf;
++        }
++        parser->write_buf = NULL;
++        parser->write_buf_count = 0;
++        parser->write_buf_total_size = 0;
++    }
++
+     if (unserialize_int(parser, &state, &remain, &i, "length")) {
+         usbredirparser_assert_invariants(parser);
+         return -1;
+-- 
+2.37.1
+
